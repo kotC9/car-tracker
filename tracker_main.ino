@@ -17,11 +17,17 @@ enum system_parts
 const String modules_name[] = {IDNAME(sys_module), IDNAME(gsm_module), IDNAME(rtc_module), IDNAME(sd_module)};
 const int sd_cs = 4;
 const String datetime_filename = "datetime.txt";
+const String settings_filename = "settings.txt";
 
 bool module_ok[] = {false, false, false, false};
 File log_file;
 File gsm_track;
 DS3231 rtc;
+String server_ip = "";
+String server_login = "";
+String server_password = "";
+int counting_delay = 10000; // в миллисекундах  
+String sim_apn;
 
 String date_format(int val)
 {
@@ -68,12 +74,36 @@ bool try_set_new_datetime(String date)
   return true;
 }
 
-void sd_println(File *file, String str)
+void parse_settings(String line, int line_number)
+{
+  switch(line_number)
+  {
+    case 0:
+      server_ip = line;
+      return;
+    case 1:
+      server_login = line;
+      return;
+    case 2:
+      server_password = line;
+      return;
+    case 3:
+      counting_delay = line.toInt();
+      return;
+    case 4:
+      sim_apn = line;
+      return;
+    default:
+      return;
+  }
+}
+
+void sd_println(File file, String str)
 {
   if(module_ok[sd_module])
   {
-    file->println(str);
-    file->flush();
+    file.println(str);
+    file.flush();
   }
 }
 
@@ -83,7 +113,7 @@ void log(system_parts part, String text)
   String date = get_datetime();
   String str = String("[" + name + "][" + date + "]: " + text);
   Serial.println(str);
-  sd_println(&log_file, str);
+  sd_println(log_file, str);
 }
 
 bool sd_init()
@@ -94,7 +124,7 @@ bool sd_init()
     return false;
   }
 
-  log_file = SD.open("log.txt", O_APPEND);
+  log_file = SD.open("log.txt", FILE_WRITE);
 
   log(sd_module, "init ok");
   return true;
@@ -141,9 +171,61 @@ bool rtc_init()
 
 bool gsm_init()
 {
+  // если сдкарта подключена - пытаемся считать новую дату
+  if(module_ok[sd_module])
+  {
+    if(SD.exists(settings_filename))
+    {
+        File settings_file = SD.open(settings_filename);
+        if(settings_file)
+        {
+          log(rtc_module, "reading datetime from file");
+          String settings_line = "";
+          int count = 0;
+          while (settings_file.available()) {
+            char c = (char)settings_file.read();
+            if(c == '\n')
+            {
+              parse_settings(settings_line, count);
+              settings_line = "";
+              count++;
+              continue;
+            }
+            settings_line += c;
+          }
+
+          settings_file.close();
+        }
+    }
+  }
+  else
+  {
+    return false;
+  }
+
+  // TODO: kotc9 инициализация gps, http
 
   log(gsm_module, "init ok");
   return true;
+}
+
+bool gps_update(double &latitude, double &longitude, double &altitude, double &speed)
+{
+  // TODO: kotc9 получение данных с gps
+}
+
+void log_track(double latitude, double longitude, double altitude, double speed)
+{
+  String name = modules_name[part];
+  String date = get_datetime();
+  String str = String("[" + name + "][" + date + "]: " + String(latitude) + " " + String(longitude) + " " + String(altitude) + " " + String(speed));
+  Serial.println(str);
+  sd_println(gsm_track, str);
+}
+
+bool send_server(double latitude, double longitude, double altitude, double speed)
+{
+  // TODO: kotc9 отправка на сервер
 }
 
 void setup() {
@@ -158,6 +240,27 @@ void setup() {
   module_ok[gsm_module] = gsm_init();
 }
 
+unsigned int old_counting_timer = 0;
 void loop() {
-
+  if(millis() - old_counting_timer >= counting_delay)
+  {
+    double latitude = 0;
+    double longitude = 0;
+    double altitude = 0;
+    double speed = 0;
+    if(gps_update(&latitude, &longitude, &altitude, &speed))
+    {
+      if(speed >= 2) // скорость больше 2m/s = 7.2km/h
+      {
+        // пишем на сдкарту
+        log_track(latitude, longitude, altitude, speed);
+        // отправляем на сервер
+        if(!send_server(latitude, longitude, altitude, speed))
+        {
+          log(gsm_module, "unable send to server");
+        }
+      }
+    }
+    old_counting_timer = millis();
+  }
 }
